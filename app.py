@@ -4,6 +4,7 @@ import os
 from datetime import datetime, date, timedelta
 
 DATA_FILE = "projects.json"
+LOG_FILE  = "daily_log.json"
 
 st.set_page_config(
     page_title="Tracker",
@@ -11,6 +12,29 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── Password protection ────────────────────────
+def check_password():
+    if st.session_state.get("authenticated"):
+        return True
+    st.markdown("""
+    <style>
+    .main .block-container { max-width: 420px !important; padding-top: 5rem !important; }
+    </style>
+    """, unsafe_allow_html=True)
+    st.markdown('''<div style="font-family:'Playfair Display',serif;font-size:32px;font-weight:700;color:#e8e0d4;text-align:center;margin-bottom:2rem">◈ Tracker</div>''', unsafe_allow_html=True)
+    pwd = st.text_input("Password", type="password", placeholder="Enter password...", label_visibility="collapsed")
+    if st.button("Enter →", key="login_btn"):
+        correct = st.secrets.get("APP_PASSWORD", "")
+        if pwd == correct:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    return False
+
+if not check_password():
+    st.stop()
 
 st.markdown("""
 <style>
@@ -345,6 +369,17 @@ def move_item(lst, i, d):
         return True
     return False
 
+# ── Daily log helpers ──
+def load_log():
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE) as f:
+            return json.load(f)
+    return []
+
+def save_log(logs):
+    with open(LOG_FILE, "w") as f:
+        json.dump(logs, f, indent=2)
+
 # ── Session state ──────────────────────────────
 
 if "data" not in st.session_state:
@@ -391,6 +426,8 @@ with st.sidebar:
     st.markdown("<hr style='border-color:#2a2420;margin:1.5rem 0 1rem'>", unsafe_allow_html=True)
     if st.button("◈  Dashboard", key="sb_dash"):
         switch("dashboard")
+    if st.button("📝  Daily log", key="sb_log"):
+        switch("daily_log")
 
     st.markdown("<div style='margin:1.25rem 0 0.6rem;font-size:10px;color:#3a3428;letter-spacing:0.1em'>GOALS</div>", unsafe_allow_html=True)
     if st.button("◎  Quarterly goals", key="sb_goals"):
@@ -1107,3 +1144,181 @@ elif st.session_state.view == "goal_edit":
                 save_data(data); switch("goal_detail", goal["id"]); st.rerun()
         if cancel:
             switch("goal_detail", goal["id"]); st.rerun()
+
+# ══════════════════════════════════════════════
+# DAILY LOG
+# ══════════════════════════════════════════════
+
+elif st.session_state.view == "daily_log":
+    logs = load_log()
+    today_str = str(date.today())
+    today_log = next((l for l in logs if l["date"] == today_str), None)
+
+    st.markdown('<div class="section-head">Daily log</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-sub">Write up what you did today — Claude will clean it up and build your weekly summary</div>', unsafe_allow_html=True)
+
+    # ── Today's entry ──
+    st.markdown('<div class="label-sm">Today</div>', unsafe_allow_html=True)
+
+    with st.form("daily_log_form"):
+        existing_raw = today_log.get("raw", "") if today_log else ""
+        raw_notes = st.text_area(
+            "",
+            value=existing_raw,
+            placeholder="Just write freely — what did you work on today? Meetings, progress made, decisions, blockers, anything notable. Don't worry about formatting, Claude will clean it up.",
+            height=200,
+            label_visibility="collapsed",
+        )
+        if st.form_submit_button("Save & clean with Claude →"):
+            if not raw_notes.strip():
+                st.error("Add some notes first.")
+            else:
+                with st.spinner("Claude is tidying your notes..."):
+                    try:
+                        import anthropic
+                        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY",""))
+                        prompt = f"""A researcher has written up their work day in rough notes. Clean this into a concise, well-structured daily log entry.
+
+Date: {today_str}
+Raw notes: {raw_notes}
+
+Format as 3-5 bullet points covering:
+- What was worked on / completed
+- Key decisions or progress made
+- Anything blocked or outstanding
+
+Keep it factual, concise, and in first person. Plain text only, use • for bullets."""
+
+                        msg = client.messages.create(
+                            model="claude-sonnet-4-6",
+                            max_tokens=400,
+                            messages=[{"role":"user","content":prompt}]
+                        )
+                        cleaned = msg.content[0].text
+                    except Exception as e:
+                        cleaned = raw_notes
+                        st.warning(f"Couldn't reach Claude ({e}) — saved raw notes.")
+
+                entry = {
+                    "date":    today_str,
+                    "raw":     raw_notes.strip(),
+                    "cleaned": cleaned,
+                }
+                if today_log:
+                    for i, l in enumerate(logs):
+                        if l["date"] == today_str:
+                            logs[i] = entry
+                            break
+                else:
+                    logs.append(entry)
+
+                save_log(logs)
+                st.rerun()
+
+    # Show today's cleaned entry if it exists
+    if today_log and today_log.get("cleaned"):
+        st.markdown("<hr class='soft-div'>", unsafe_allow_html=True)
+        st.markdown('<div class="label-sm">Today\'s cleaned entry</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="background:#1a1612;border:1px solid #2a2420;border-radius:10px;padding:1.1rem 1.35rem">', unsafe_allow_html=True)
+        for line in today_log["cleaned"].split("\n"):
+            line = line.strip()
+            if not line: continue
+            st.markdown(f'<div style="font-size:14px;color:#a89880;line-height:1.8;padding:2px 0">{line}</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown("<hr class='soft-div'>", unsafe_allow_html=True)
+
+    # ── Weekly summary ──
+    st.markdown('<div class="label-sm">Weekly summary</div>', unsafe_allow_html=True)
+
+    # Get this week's logs (Mon–today)
+    today_dt   = date.today()
+    week_start = today_dt - timedelta(days=today_dt.weekday())
+    week_logs  = [l for l in logs if week_start <= date.fromisoformat(l["date"]) <= today_dt]
+
+    col_info, col_btn = st.columns([4, 1])
+    with col_info:
+        st.markdown(f'<div style="font-size:13px;color:#5a5248">{len(week_logs)} entries this week ({week_start.strftime("%d %b")} – {today_dt.strftime("%d %b")})</div>', unsafe_allow_html=True)
+    with col_btn:
+        gen_summary = st.button("Generate →", key="gen_weekly")
+
+    if gen_summary:
+        if not week_logs:
+            st.warning("No log entries this week yet.")
+        else:
+            with st.spinner("Building your weekly summary..."):
+                try:
+                    import anthropic
+                    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY",""))
+
+                    all_entries = "\n\n".join([
+                        f"--- {l['date']} ---\n{l.get('cleaned', l.get('raw',''))}"
+                        for l in sorted(week_logs, key=lambda x: x["date"])
+                    ])
+
+                    goals_text = ""
+                    if data.get("goals"):
+                        this_quarter_goals = [g for g in data["goals"] if g.get("quarter","") in [
+                            f"Q{((date.today().month-1)//3)+1} {date.today().year}",
+                            f"Q{((date.today().month-1)//3)+1}{date.today().year}",
+                        ]]
+                        if this_quarter_goals:
+                            goals_text = "\n\nCurrent quarterly goals:\n" + "\n".join(f"- {g['title']}" for g in this_quarter_goals)
+
+                    prompt = f"""You are summarising a researcher's work week based on their daily log entries.
+
+{all_entries}{goals_text}
+
+Write a structured weekly summary with four sections:
+
+1. **What I accomplished** — key outputs, completions, progress made (3-5 bullets)
+2. **Patterns & themes** — what dominated the week, recurring themes, how time was spent (2-3 sentences)
+3. **Progress against quarterly goals** — how this week's work connects to the stated goals, or where there are gaps (2-3 sentences; if no goals provided, skip this section)
+4. **Going into next week** — anything outstanding, blockers to address, momentum to carry forward (2-3 bullets)
+
+Be direct, insightful, and specific. Plain text, use • for bullets."""
+
+                    msg = client.messages.create(
+                        model="claude-sonnet-4-6",
+                        max_tokens=700,
+                        messages=[{"role":"user","content":prompt}]
+                    )
+                    weekly = msg.content[0].text
+                    st.session_state.weekly_summary = weekly
+                except Exception as e:
+                    st.error(f"Couldn't generate summary: {e}")
+
+    if st.session_state.get("weekly_summary"):
+        st.markdown(f'<div style="background:#1a1612;border:1px solid #2a2420;border-radius:10px;padding:1.35rem 1.5rem;margin-top:0.75rem">', unsafe_allow_html=True)
+        current_section = None
+        for line in st.session_state.weekly_summary.split("\n"):
+            line = line.strip()
+            if not line: continue
+            if line.startswith(("1.","2.","3.","4.","**What","**Patterns","**Progress","**Going")):
+                clean = line.lstrip("1234. ").replace("**","")
+                st.markdown(f'<div style="font-size:11px;font-weight:600;color:#d6a564;letter-spacing:0.08em;text-transform:uppercase;margin:14px 0 5px">{clean}</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div style="font-size:13px;color:#a89880;line-height:1.7;padding:1px 0">{line}</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown("<hr class='soft-div'>", unsafe_allow_html=True)
+
+    # ── Past entries ──
+    past = [l for l in sorted(logs, key=lambda x: x["date"], reverse=True) if l["date"] != today_str]
+    if past:
+        st.markdown('<div class="label-sm">Past entries</div>', unsafe_allow_html=True)
+        for l in past[:14]:
+            d = date.fromisoformat(l["date"])
+            with st.expander(d.strftime("%A, %d %B %Y")):
+                if l.get("cleaned"):
+                    for line in l["cleaned"].split("\n"):
+                        line = line.strip()
+                        if line:
+                            st.markdown(f'<div style="font-size:13px;color:#a89880;line-height:1.7">{line}</div>', unsafe_allow_html=True)
+                if l.get("raw") and l["raw"] != l.get("cleaned",""):
+                    with st.expander("Raw notes"):
+                        st.markdown(f'<div style="font-size:12px;color:#5a5248;line-height:1.6">{l["raw"]}</div>', unsafe_allow_html=True)
+                if st.button("🗑 Delete", key=f"del_log_{l['date']}"):
+                    logs = [x for x in logs if x["date"] != l["date"]]
+                    save_log(logs)
+                    st.rerun()
