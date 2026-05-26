@@ -411,10 +411,19 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    if st.button("＋  New project", key="sb_new"):
-        switch("new")
+    if st.button("◈  Dashboard", key="sb_dash"):
+        switch("dashboard")
+    if st.button("📝  Daily log", key="sb_log"):
+        switch("daily_log")
 
-    st.markdown("<div style='margin:1.25rem 0 0.6rem;font-size:10px;color:#3a3428;letter-spacing:0.1em'>PROJECTS</div>", unsafe_allow_html=True)
+    st.markdown("<hr style='border-color:#2a2420;margin:1rem 0'>", unsafe_allow_html=True)
+
+    col_sb1, col_sb2 = st.columns([3,1])
+    with col_sb1:
+        st.markdown("<div style='font-size:10px;color:#3a3428;letter-spacing:0.1em;padding-top:6px'>PROJECTS</div>", unsafe_allow_html=True)
+    with col_sb2:
+        if st.button("＋", key="sb_new", help="New project"):
+            switch("new")
 
     if not projects:
         st.markdown("<div style='font-size:12px;color:#3a3428;padding:4px 0'>Nothing here yet</div>", unsafe_allow_html=True)
@@ -422,12 +431,6 @@ with st.sidebar:
         pct = get_progress(p)
         if st.button(f"{p['name']}", key=f"sb_{p['id']}"):
             switch("detail", p["id"])
-
-    st.markdown("<hr style='border-color:#2a2420;margin:1.5rem 0 1rem'>", unsafe_allow_html=True)
-    if st.button("◈  Dashboard", key="sb_dash"):
-        switch("dashboard")
-    if st.button("📝  Daily log", key="sb_log"):
-        switch("daily_log")
 
     st.markdown("<div style='margin:1.25rem 0 0.6rem;font-size:10px;color:#3a3428;letter-spacing:0.1em'>GOALS</div>", unsafe_allow_html=True)
     if st.button("◎  Quarterly goals", key="sb_goals"):
@@ -498,19 +501,49 @@ if st.session_state.view == "dashboard":
         st.markdown("<hr class='soft-div'>", unsafe_allow_html=True)
 
         # Priority tasks
-        st.markdown('<div class="label-sm">Focus — high priority tasks</div>', unsafe_allow_html=True)
+        st.markdown('<div class="label-sm">Focus — pending tasks</div>', unsafe_allow_html=True)
+
+        # Filter controls
+        fc1, fc2, fc3 = st.columns([2, 2, 1])
+        with fc1:
+            pri_filter = st.selectbox("Priority", ["All","High","Medium","Low"], key="dash_pri_filter", label_visibility="collapsed")
+        with fc2:
+            proj_names = ["All projects"] + [p["name"] for p in projects]
+            proj_filter = st.selectbox("Project", proj_names, key="dash_proj_filter", label_visibility="collapsed")
+        with fc3:
+            PAGE_SIZE = 8
+            if "task_page" not in st.session_state:
+                st.session_state.task_page = 0
 
         all_pending = []
         for p in projects:
             for t in p.get("tasks",[]):
                 if not t.get("done"):
+                    if pri_filter != "All" and t.get("priority","Medium") != pri_filter:
+                        continue
+                    if proj_filter != "All projects" and p["name"] != proj_filter:
+                        continue
                     all_pending.append((p,t))
-        all_pending.sort(key=lambda x: pri_order(x[1].get("priority","Medium")))
+
+        # Sort by due date first (tasks with due dates come first, sorted ascending), then priority
+        def sort_key(x):
+            t = x[1]
+            due = t.get("due","")
+            has_due = 1 if not due else 0
+            return (has_due, due, pri_order(t.get("priority","Medium")))
+
+        all_pending.sort(key=sort_key)
 
         if not all_pending:
             st.markdown('<div style="font-size:13px;color:#3a3428;padding:0.5rem 0">All clear — no pending tasks 🎉</div>', unsafe_allow_html=True)
         else:
-            for p, t in all_pending[:10]:
+            total = len(all_pending)
+            page  = st.session_state.task_page
+            start = page * PAGE_SIZE
+            end   = min(start + PAGE_SIZE, total)
+            page_tasks = all_pending[start:end]
+
+            for p, t in page_tasks:
                 pri = t.get("priority","Medium")
                 lc  = {"High":"prio-card","Medium":"prio-card prio-card-med","Low":"prio-card prio-card-low"}.get(pri,"prio-card prio-card-med")
                 due = f' · <span style="color:#e07060">Due {t["due"]}</span>' if t.get("due") else ''
@@ -525,9 +558,45 @@ if st.session_state.view == "dashboard":
                 with col_btn:
                     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
                     if st.button("✓", key=f"dash_done_{t['id']}"):
-                        t["done"] = True
-                        t["done_date"] = str(date.today())
+                        st.session_state.completing_task_id = t['id']
+                        st.session_state.completing_task_proj = p['id']
+                        st.rerun()
+
+            # Pagination controls
+            pc1, pc2, pc3 = st.columns([1,3,1])
+            with pc1:
+                if page > 0 and st.button("← Prev", key="task_prev"):
+                    st.session_state.task_page -= 1; st.rerun()
+            with pc2:
+                st.markdown(f'<div style="text-align:center;font-size:12px;color:#5a5248;padding-top:6px">Showing {start+1}–{end} of {total}</div>', unsafe_allow_html=True)
+            with pc3:
+                if end < total and st.button("Next →", key="task_next"):
+                    st.session_state.task_page += 1; st.rerun()
+
+        # Complete task modal (link attachment)
+        if st.session_state.get("completing_task_id"):
+            tid  = st.session_state.completing_task_id
+            proj = next((p for p in projects if p["id"] == st.session_state.get("completing_task_proj")), None)
+            task = next((t for t in proj.get("tasks",[]) if t["id"] == tid), None) if proj else None
+            if task:
+                st.markdown("<hr class='soft-div'>", unsafe_allow_html=True)
+                st.markdown(f'<div style="font-size:13px;color:#d6a564;margin-bottom:0.5rem">✓ Completing: <strong>{task["text"]}</strong></div>', unsafe_allow_html=True)
+                completion_link = st.text_input("Add a completion link (optional)", placeholder="e.g. link to output, doc, or PR", key="completion_link_input")
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    if st.button("Mark complete →", key="confirm_complete"):
+                        task["done"] = True
+                        task["done_date"] = str(date.today())
+                        if completion_link.strip():
+                            task["completion_link"] = completion_link.strip()
                         save_data(data)
+                        st.session_state.completing_task_id = None
+                        st.session_state.completing_task_proj = None
+                        st.rerun()
+                with cc2:
+                    if st.button("Cancel", key="cancel_complete"):
+                        st.session_state.completing_task_id = None
+                        st.session_state.completing_task_proj = None
                         st.rerun()
 
         st.markdown("<hr class='soft-div'>", unsafe_allow_html=True)
@@ -680,10 +749,11 @@ elif st.session_state.view == "detail":
         with col_info:
             detail_part = f' &nbsp;·&nbsp; <span style="color:#3a3428">{t["detail"]}</span>' if t.get("detail") else ''
             link_part   = f' &nbsp;<a href="{t["link"]}" target="_blank" style="color:#d6a564;font-size:12px">↗ link</a>' if t.get("link") else ''
+            comp_link   = f' &nbsp;<a href="{t["completion_link"]}" target="_blank" style="color:#70a870;font-size:12px">↗ output</a>' if t.get("completion_link") else ''
             st.markdown(f"""
             <div class="task-row" style="{'opacity:0.35' if is_done else ''}">
                 <div class="{title_cls}">{t['text']} {'' if is_done else pri_badge(pri)}</div>
-                <div class="task-meta">{due_str}{ctx_str}{detail_part}{link_part}</div>
+                <div class="task-meta">{due_str}{ctx_str}{detail_part}{link_part}{comp_link}</div>
             </div>""", unsafe_allow_html=True)
         with col_act:
             a1,a2,a3 = st.columns(3)
